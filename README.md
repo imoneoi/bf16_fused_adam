@@ -20,14 +20,19 @@ PyTorch FusedAdamW States:
  - exp_avg_sq (bf16)
 
 ```
-Master weight: (1 bit sign) (8 bit exponent) (7 bit mantissa) (16 bit mantissa)
-               [            param (16)                      ] [ mantissa (16) ]
+Master weight: (sign 1) (exponent 8) (mantissa 7) (mantissa 16)   = 32bit
+               [             param 16           ] [mantissa 16]   = 32bit
 ```
 
 ## TODO
 
  - [ ] Stochastic rounding (trading precision for memory)
  - [ ] 16+8 optimizer (saving more memory)
+
+ ```
+Master weight: (sign 1) (exponent 8) (mantissa 7) (mantissa 8) (mantissa 8)   = 32bit
+               [             param 16           ] [mantissa 8] [truncated 8]   = 24bit
+```
 
 ## References
 
