@@ -159,8 +159,9 @@ void bf16_fused_adamw_cuda_impl_(
     const double eps) {
   std::vector<std::vector<at::Tensor>> tensor_lists{params, mantissas, grads, exp_avgs, exp_avg_sqs};
 
-  AT_DISPATCH_FLOATING_TYPES(
+  AT_DISPATCH_FLOATING_TYPES_AND(
       at::ScalarType::BFloat16,
+      params[0].scalar_type(),
       "bf16_fused_adamw_kernel_cuda",
       [&]() {
         at::native::multi_tensor_apply_for_fused_optimizer<5>(
