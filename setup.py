@@ -10,7 +10,7 @@ NVIDIA_SUPPORTED_ARCHS = {"80", "90"}
 
 # Compiler flags.
 CXX_FLAGS = ["-O2", "-std=c++17"]
-NVCC_FLAGS = ["-O2", "-std=c++17"]
+NVCC_FLAGS = ["-O2", "-std=c++17", "--expt-extended-lambda"]
 
 
 # Initialize ext_modules to an empty list
@@ -64,5 +64,5 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
-    extras_require=[],
+    extras_require={},
 )
