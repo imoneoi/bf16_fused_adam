@@ -146,22 +146,21 @@ struct FusedAdamMathFunctor {
 };
 
 void bf16_fused_adamw_cuda_impl_(
-    at::TensorList params,
-    at::TensorList mantissas,
-    at::TensorList grads,
-    at::TensorList exp_avgs,
-    at::TensorList exp_avg_sqs,
-    at::TensorList state_steps,
+    std::vector<at::Tensor> params,
+    std::vector<at::Tensor> mantissas,
+    std::vector<at::Tensor> grads,
+    std::vector<at::Tensor> exp_avgs,
+    std::vector<at::Tensor> exp_avg_sqs,
+    std::vector<at::Tensor> state_steps,
     const double lr,
     const double beta1,
     const double beta2,
     const double weight_decay,
     const double eps) {
-  std::vector<std::vector<at::Tensor>> tensor_lists{
-      params.vec(), mantissas.vec(), grads.vec(), exp_avgs.vec(), exp_avg_sqs.vec()};
+  std::vector<std::vector<at::Tensor>> tensor_lists{params, mantissas, grads, exp_avgs, exp_avg_sqs};
 
   AT_DISPATCH_FLOATING_TYPES(
-      at::kBFloat16,
+      at::ScalarType::BFloat16,
       "bf16_fused_adamw_kernel_cuda",
       [&]() {
         at::native::multi_tensor_apply_for_fused_optimizer<5>(
