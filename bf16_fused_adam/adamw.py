@@ -6,7 +6,7 @@ import bf16_fused_adam_backend
 from typing import List, Tuple, Union
 from torch import Tensor
 from torch.optim.optimizer import Optimizer, ParamsT
-                        
+
 
 class BF16FusedAdamW(Optimizer):
     def __init__(

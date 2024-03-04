@@ -1,4 +1,4 @@
-from adamw import BF16FusedAdamW
+from .adamw import BF16FusedAdamW
 
 
 __all__ = [

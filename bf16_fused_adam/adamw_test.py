@@ -4,8 +4,8 @@ import torch
 import math
 import pytest
 
-from adamw import _bf16_fused_adamw
-from triton_ops import bit_concat, bit_split
+from .adamw import _bf16_fused_adamw
+from .triton_ops import bit_concat, bit_split
 
 
 def _bf16_adamw_reference_impl(
