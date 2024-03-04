@@ -34,6 +34,13 @@ Master weight: (sign 1) (exponent 8) (mantissa 7) (mantissa 8) (mantissa 8)   = 
                [             param 16           ] [mantissa 8] [truncated 8]   = 24bit
 ```
 
+## Tests passed
+
+ - [x] H100
+ - [x] A100
+ - [ ] 4090
+ - [ ] 3090
+
 ## References
 
 16+16 optimizer:
