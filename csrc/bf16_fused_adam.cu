@@ -22,6 +22,8 @@ constexpr uint8_t kExpAvgSqIdx = 4;
 
 template <typename T>
 __device__ __forceinline__ T lerp(const T v0, const T v1, const T t) {
+    // NOTE(one): Identical to PyTorch when t < 0.5
+    // https://github.com/pytorch/pytorch/blob/b7f25226929e70187a9f36c393665abad0b25190/aten/src/ATen/native/Lerp.h#L21
     return fma(t, v1, fma(-t, v0, v0));
 }
 
@@ -57,6 +59,9 @@ __device__ __forceinline__ void adamw_math(
         param *= wd_alpha;
 
         exp_avg = lerp(exp_avg, grad, mbeta1);
+        // TODO(one): Consider also using lerp here?
+        // exp_avg_sq = lerp(exp_avg_sq, grad * grad, mbeta2);
+        // The current expression is to keep consistency with the PyTorch implementation https://github.com/pytorch/pytorch/blob/main/torch/optim/adamw.py
         exp_avg_sq = exp_avg_sq * beta2 + (1 - beta2) * (grad * grad);
 
         const float denom = (std::sqrt(exp_avg_sq) / bias_correction2_sqrt) + eps;
