@@ -40,7 +40,6 @@ __device__ __forceinline__ void adamw_math(
     const float &wd_alpha,
     const float &mbeta1,
     const float &beta2,
-    const float &weight_decay,
     const float &eps,
     const float &bias_correction2_sqrt)
 {
@@ -111,7 +110,6 @@ struct FusedAdamMathFunctor {
             wd_alpha,
             mbeta1,
             beta2,
-            weight_decay,
             eps,
             bias_correction2_sqrt);
 #pragma unroll
@@ -131,7 +129,6 @@ struct FusedAdamMathFunctor {
             wd_alpha,
             mbeta1,
             beta2,
-            weight_decay,
             eps,
             bias_correction2_sqrt);
 #pragma unroll
