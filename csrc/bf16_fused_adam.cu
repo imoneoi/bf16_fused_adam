@@ -53,7 +53,7 @@ __device__ __forceinline__ void adamw_math(
         exp_avg_sq = lerp(exp_avg_sq, grad * grad, mbeta2);
 
         // Update Size
-        bfloat16_t denom = (sqrt(exp_avg_sq) / bias_correction2_sqrt) + eps;
+        bfloat16_t denom = (hsqrt(exp_avg_sq) / bias_correction2_sqrt) + eps;
         bfloat16_t update = step_size * exp_avg / denom + wd_step_size * param;
 
         // Kahan Summation
@@ -68,6 +68,24 @@ __device__ __forceinline__ void adamw_math(
         r_args[kExpAvgIdx][ii] = exp_avg;
         r_args[kExpAvgSqIdx][ii] = exp_avg_sq;
     }
+}
+
+template <int depth, typename T>
+__device__ void load_args_no_clear(
+    T r_args[][kILP],
+    T** args,
+    const int64_t i_start,
+    const int64_t chunk_size,
+    const int64_t n) {
+#pragma unroll
+  for (int ii = 0; ii < kILP; ii++) {
+    const auto i = i_start + threadIdx.x + ii * blockDim.x;
+    for (int r_index = 0; r_index < depth; r_index++) {
+      if (i < n && i < chunk_size) {
+        r_args[r_index][ii] = args[r_index][i];
+      }
+    }
+  }
 }
 
 struct FusedAdamMathFunctor {
@@ -88,7 +106,14 @@ struct FusedAdamMathFunctor {
       const auto bias_correction2 = 1 - at::native::pow_(beta2, *step_count);
       const auto bias_correction2_sqrt = std::sqrt(bias_correction2);
 
-      return {-lr / bias_correction1, -lr * weight_decay, bias_correction2_sqrt, 1 - beta1, 1 - beta2, eps};
+      return {
+        __double2bfloat16(-lr / bias_correction1),
+        __double2bfloat16(-lr * weight_decay),
+        __double2bfloat16(bias_correction2_sqrt),
+        __double2bfloat16(1 - beta1),
+        __double2bfloat16(1 - beta2),
+        __double2bfloat16(eps)
+      };
     }();
 
     bfloat16_t* args[kArgsDepth];
@@ -123,7 +148,8 @@ struct FusedAdamMathFunctor {
     } else {
       for (int64_t i_start = 0; i_start < n && i_start < chunk_size;
            i_start += blockDim.x * kILP) {
-        at::native::load_args<kArgsDepth>(r_args, args, i_start, chunk_size, n);
+        // Adam operator is elementwise, so we can safely load without clearing out of bound values.
+        load_args_no_clear<kArgsDepth>(r_args, args, i_start, chunk_size, n);
         adamw_math(
             r_args,
             step_size,

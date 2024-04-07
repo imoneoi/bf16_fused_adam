@@ -5,7 +5,6 @@ import math
 import pytest
 
 from .adamw import _bf16_fused_adamw
-from .triton_ops import bit_concat, bit_split
 
 
 def _bf16_adamw_reference_impl(
@@ -25,8 +24,6 @@ def _bf16_adamw_reference_impl(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Cast to fp32.
     grad = grad.to(torch.float32)
-    exp_avg = exp_avg.to(torch.float32)
-    exp_avg_sq = exp_avg_sq.to(torch.float32)
 
     # Math
     # Reference implementation (PyTorch):
@@ -39,7 +36,7 @@ def _bf16_adamw_reference_impl(
     denom = (exp_avg_sq.sqrt() / bias_correction2_sqrt).add_(eps)
     param.addcdiv_(exp_avg, denom, value=-step_size)
 
-    return param, exp_avg.to(torch.bfloat16), exp_avg_sq.to(torch.bfloat16)
+    return param, exp_avg, exp_avg_sq
 
 
 @pytest.mark.parametrize("params_shape", [(1, ), (4096, ), (4096, 14336)])
@@ -54,20 +51,23 @@ def test_bf16_adamw_backend(
     beta2=0.95,
     init_std=0.02,
     grad_std=0.001,
-    atol=0.0002,
+    atol=0.0007,
     steps=100
 ):
     torch.random.manual_seed(0)
 
+    initial_param = torch.empty(params_shape, dtype=torch.bfloat16, device="cuda").normal_(std=init_std).to(torch.float32)
+
     # Reference
-    ref_param = torch.empty(params_shape, dtype=torch.float32, device="cuda").normal_(std=init_std)
-    ref_exp_avg = torch.zeros_like(ref_param, dtype=torch.bfloat16)
-    ref_exp_avg_sq = torch.zeros_like(ref_param, dtype=torch.bfloat16)
+    ref_param = initial_param.clone()
+    ref_exp_avg = torch.zeros_like(ref_param, dtype=torch.float32)
+    ref_exp_avg_sq = torch.zeros_like(ref_param, dtype=torch.float32)
     ref_steps = 0
 
     # Test
-    test_param, test_mantissa = bit_split(ref_param)
+    test_param = ref_param.to(torch.bfloat16)
 
+    test_residual = torch.zeros_like(test_param)
     test_exp_avg = torch.zeros_like(test_param)
     test_exp_avg_sq = torch.zeros_like(test_param)
     test_steps = torch.zeros((), dtype=torch.float32, device="cuda")
@@ -93,7 +93,7 @@ def test_bf16_adamw_backend(
         # Test
         _bf16_fused_adamw(
             [test_param],
-            [test_mantissa],
+            [test_residual],
             [grad],
             [test_exp_avg],
             [test_exp_avg_sq],
@@ -105,10 +105,11 @@ def test_bf16_adamw_backend(
             eps
         )
 
-    # Check
-    test_param_fp32 = bit_concat(test_param, test_mantissa)
+    # Info
+    print (f"[shape {params_shape} lr {lr} eps {eps}] Mean update magnitude: {torch.mean(torch.abs(initial_param - ref_exp_avg))}, atol: {atol}")
 
-    assert torch.allclose(test_param_fp32, ref_param, rtol=0, atol=atol)
-    assert torch.allclose(test_exp_avg, ref_exp_avg, rtol=0, atol=atol)
-    assert torch.allclose(test_exp_avg_sq, ref_exp_avg_sq, rtol=0, atol=atol)
+    # Check
+    assert torch.allclose(test_param.to(torch.float32), ref_param, rtol=0, atol=atol)
+    assert torch.allclose(test_exp_avg.to(torch.float32), ref_exp_avg, rtol=0, atol=atol)
+    assert torch.allclose(test_exp_avg_sq.to(torch.float32), ref_exp_avg_sq, rtol=0, atol=atol)
     assert test_steps.item() == ref_steps
