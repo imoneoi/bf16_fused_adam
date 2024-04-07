@@ -1,5 +1,7 @@
 #include "bf16_fused_adam.h"
 
+#include <cuda_bf16.h>
+
 #include <ATen/core/Tensor.h>
 #include <ATen/native/cuda/ForeachFunctors.cuh>
 #include <ATen/native/cuda/MultiTensorApply.cuh>
@@ -9,66 +11,60 @@
 
 namespace bf16_fused_adam {
 
-using bfloat16_t = at::BFloat16;
+using bfloat16_t = __nv_bfloat16;
 using at::native::kILP;
 
 constexpr int kArgsDepth = 5;
 
 constexpr uint8_t kParamIdx = 0;
-constexpr uint8_t kMantissaIdx = 1;
+constexpr uint8_t kResidualIdx = 1;
 constexpr uint8_t kGradIdx = 2;
 constexpr uint8_t kExpAvgIdx = 3;
 constexpr uint8_t kExpAvgSqIdx = 4;
 
-template <typename T>
-__device__ __forceinline__ T lerp(const T v0, const T v1, const T t) {
+__device__ __forceinline__ bfloat16_t lerp(const bfloat16_t &v0, const bfloat16_t &v1, const bfloat16_t &t) {
     // NOTE(one): Identical to PyTorch when t < 0.5
     // https://github.com/pytorch/pytorch/blob/b7f25226929e70187a9f36c393665abad0b25190/aten/src/ATen/native/Lerp.h#L21
-    return fma(t, v1, fma(-t, v0, v0));
-}
-
-__device__ __forceinline__ float concat_float(const bfloat16_t value, const bfloat16_t mantissa) {
-    return __uint_as_float((static_cast<uint32_t>(value.x) << 16) | static_cast<uint32_t>(mantissa.x));
-}
-
-__device__ __forceinline__ void split_float(const float f, bfloat16_t &value, bfloat16_t &mantissa) {
-    value.x = static_cast<uint16_t>(__float_as_uint(f) >> 16);
-    mantissa.x = static_cast<uint16_t>(__float_as_uint(f));
+    return __hfma(t, v1, __hfma(-t, v0, v0));
 }
 
 __device__ __forceinline__ void adamw_math(
     bfloat16_t r_args[kArgsDepth][kILP],
-    const float &step_size,
-    const float &wd_alpha,
-    const float &mbeta1,
-    const float &beta2,
-    const float &eps,
-    const float &bias_correction2_sqrt)
+    const bfloat16_t &step_size,
+    const bfloat16_t &wd_step_size,
+    const bfloat16_t &mbeta1,
+    const bfloat16_t &mbeta2,
+    const bfloat16_t &eps,
+    const bfloat16_t &bias_correction2_sqrt)
 {
 #pragma unroll
     for (int ii = 0; ii < kILP; ii++)
     {
-        // Load values.
-        float param = concat_float(r_args[kParamIdx][ii], r_args[kMantissaIdx][ii]);
+        bfloat16_t param = r_args[kParamIdx][ii];
+        bfloat16_t residual = r_args[kResidualIdx][ii];
 
-        const float grad = static_cast<float>(r_args[kGradIdx][ii]);
+        bfloat16_t grad = r_args[kGradIdx][ii];
 
-        float exp_avg = static_cast<float>(r_args[kExpAvgIdx][ii]);
-        float exp_avg_sq = static_cast<float>(r_args[kExpAvgSqIdx][ii]);
+        bfloat16_t exp_avg = r_args[kExpAvgIdx][ii];
+        bfloat16_t exp_avg_sq = r_args[kExpAvgSqIdx][ii];
 
-        param *= wd_alpha;
-
+        // Adam Momentums
         exp_avg = lerp(exp_avg, grad, mbeta1);
-        // TODO(one): Consider also using lerp here?
-        // exp_avg_sq = lerp(exp_avg_sq, grad * grad, mbeta2);
-        // The current expression is to keep consistency with the PyTorch implementation https://github.com/pytorch/pytorch/blob/main/torch/optim/adamw.py
-        exp_avg_sq = exp_avg_sq * beta2 + (1 - beta2) * (grad * grad);
+        exp_avg_sq = lerp(exp_avg_sq, grad * grad, mbeta2);
 
-        const float denom = (std::sqrt(exp_avg_sq) / bias_correction2_sqrt) + eps;
-        param -= step_size * exp_avg / denom;
+        // Update Size
+        bfloat16_t denom = (sqrt(exp_avg_sq) / bias_correction2_sqrt) + eps;
+        bfloat16_t update = step_size * exp_avg / denom + wd_step_size * param;
+
+        // Kahan Summation
+        bfloat16_t kahan_increment = update - residual;
+        bfloat16_t new_param = param + kahan_increment;
+        bfloat16_t new_residual = (new_param - param) - kahan_increment;
 
         // Store results.
-        split_float(param, r_args[kParamIdx][ii], r_args[kMantissaIdx][ii]);
+        r_args[kParamIdx][ii] = new_param;
+        r_args[kResidualIdx][ii] = new_residual;
+
         r_args[kExpAvgIdx][ii] = exp_avg;
         r_args[kExpAvgSqIdx][ii] = exp_avg_sq;
     }
@@ -86,13 +82,13 @@ struct FusedAdamMathFunctor {
     const auto tensor_loc = tl.block_to_tensor[blockIdx.x];
     const auto chunk_idx = tl.block_to_chunk[blockIdx.x];
 
-    const auto [step_size, wd_alpha, bias_correction2_sqrt, mbeta1] = [&]() -> std::tuple<double, double, double, double> {
+    const auto [step_size, wd_step_size, bias_correction2_sqrt, mbeta1, mbeta2, meps] = [&]() -> std::tuple<bfloat16_t, bfloat16_t, bfloat16_t, bfloat16_t, bfloat16_t, bfloat16_t> {
       auto* step_count = reinterpret_cast<const float*>(tl.state_steps_addresses[tensor_loc]);
       const auto bias_correction1 = 1 - at::native::pow_(beta1, *step_count);
       const auto bias_correction2 = 1 - at::native::pow_(beta2, *step_count);
       const auto bias_correction2_sqrt = std::sqrt(bias_correction2);
 
-      return {lr / bias_correction1, 1 - lr * weight_decay, bias_correction2_sqrt, 1 - beta1};
+      return {-lr / bias_correction1, -lr * weight_decay, bias_correction2_sqrt, 1 - beta1, 1 - beta2, eps};
     }();
 
     bfloat16_t* args[kArgsDepth];
@@ -112,10 +108,10 @@ struct FusedAdamMathFunctor {
         adamw_math(
             r_args,
             step_size,
-            wd_alpha,
+            wd_step_size,
             mbeta1,
-            beta2,
-            eps,
+            mbeta2,
+            meps,
             bias_correction2_sqrt);
 #pragma unroll
         for (int i = 0; i < kArgsDepth; i++) {
@@ -131,10 +127,10 @@ struct FusedAdamMathFunctor {
         adamw_math(
             r_args,
             step_size,
-            wd_alpha,
+            wd_step_size,
             mbeta1,
-            beta2,
-            eps,
+            mbeta2,
+            meps,
             bias_correction2_sqrt);
 #pragma unroll
         for (int i = 0; i < kArgsDepth; i++) {
