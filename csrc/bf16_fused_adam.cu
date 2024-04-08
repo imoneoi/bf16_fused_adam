@@ -41,7 +41,7 @@ __device__ __forceinline__ void adamw_math(
     const float &step_size,
     const float &wd_alpha,
     const float &mbeta1,
-    const float &beta2,
+    const float &mbeta2,
     const float &eps,
     const float &bias_correction2_sqrt)
 {
@@ -59,10 +59,7 @@ __device__ __forceinline__ void adamw_math(
         param *= wd_alpha;
 
         exp_avg = lerp(exp_avg, grad, mbeta1);
-        // TODO(one): Consider also using lerp here?
-        // exp_avg_sq = lerp(exp_avg_sq, grad * grad, mbeta2);
-        // The current expression is to keep consistency with the PyTorch implementation https://github.com/pytorch/pytorch/blob/main/torch/optim/adamw.py
-        exp_avg_sq = exp_avg_sq * beta2 + (1 - beta2) * (grad * grad);
+        exp_avg_sq = lerp(exp_avg_sq, grad * grad, mbeta2);
 
         const float denom = (std::sqrt(exp_avg_sq) / bias_correction2_sqrt) + eps;
         param -= step_size * exp_avg / denom;
@@ -86,13 +83,20 @@ struct FusedAdamMathFunctor {
     const auto tensor_loc = tl.block_to_tensor[blockIdx.x];
     const auto chunk_idx = tl.block_to_chunk[blockIdx.x];
 
-    const auto [step_size, wd_alpha, bias_correction2_sqrt, mbeta1] = [&]() -> std::tuple<double, double, double, double> {
+    const auto [step_size, wd_alpha, bias_correction2_sqrt, mbeta1, mbeta2, meps] = [&]() -> std::tuple<float, float, float, float, float, float> {
       auto* step_count = reinterpret_cast<const float*>(tl.state_steps_addresses[tensor_loc]);
       const auto bias_correction1 = 1 - at::native::pow_(beta1, *step_count);
       const auto bias_correction2 = 1 - at::native::pow_(beta2, *step_count);
       const auto bias_correction2_sqrt = std::sqrt(bias_correction2);
 
-      return {lr / bias_correction1, 1 - lr * weight_decay, bias_correction2_sqrt, 1 - beta1};
+      return {
+        __double2float_rn(lr / bias_correction1),
+        __double2float_rn(1 - lr * weight_decay),
+        __double2float_rn(bias_correction2_sqrt),
+        __double2float_rn(1 - beta1),
+        __double2float_rn(1 - beta2),
+        __double2float_rn(eps)
+      };
     }();
 
     bfloat16_t* args[kArgsDepth];
@@ -114,8 +118,8 @@ struct FusedAdamMathFunctor {
             step_size,
             wd_alpha,
             mbeta1,
-            beta2,
-            eps,
+            mbeta2,
+            meps,
             bias_correction2_sqrt);
 #pragma unroll
         for (int i = 0; i < kArgsDepth; i++) {
@@ -133,8 +137,8 @@ struct FusedAdamMathFunctor {
             step_size,
             wd_alpha,
             mbeta1,
-            beta2,
-            eps,
+            mbeta2,
+            meps,
             bias_correction2_sqrt);
 #pragma unroll
         for (int i = 0; i < kArgsDepth; i++) {
