@@ -6,6 +6,29 @@
 #include <ATen/native/cuda/Pow.cuh>
 #include <utility>
 
+// FIXME(one): Hack for supports_large_kernel_arg
+#include <cuda_runtime.h>
+namespace at::native {
+
+bool supports_large_kernel_arg() {
+#if CUDART_VERSION >= 12010
+  static std::optional<bool> supports_large_kernel_arg_ = std::nullopt;
+  if (!supports_large_kernel_arg_.has_value()) {
+    int driver_ver = 0;
+    AT_CUDA_CHECK(cudaDriverGetVersion(&driver_ver));
+    cudaDeviceProp* prop = at::cuda::getCurrentDeviceProperties();
+    supports_large_kernel_arg_ = (driver_ver >= 12010) && prop->major >= 7;
+  }
+  const bool is_capturing = at::cuda::currentStreamCaptureStatusMayInitCtx() !=
+      at::cuda::CaptureStatus::None;
+  return !is_capturing && *supports_large_kernel_arg_;
+#else
+  return false;
+#endif
+}
+
+} // namespace at::native
+// FIXME(one): End hack for supports_large_kernel_arg
 
 namespace bf16_fused_adam {
 
@@ -71,10 +94,12 @@ __device__ __forceinline__ void adamw_math(
     }
 }
 
+template<bool large_kernel_arg>
 struct FusedAdamMathFunctor {
+  static constexpr bool use_large_kernel_arg = large_kernel_arg;
   __device__ __forceinline__ void operator()(
       int chunk_size,
-      at::native::FusedOptimizerTensorListMetadata<kArgsDepth>& tl,
+      at::native::FusedOptimizerTensorListMetadata<kArgsDepth, large_kernel_arg>& tl,
       const double& lr,
       const double& beta1,
       const double& beta2,
@@ -170,15 +195,17 @@ void bf16_fused_adamw_cuda_impl_(
       params[0].scalar_type(),
       "bf16_fused_adamw_kernel_cuda",
       [&]() {
-        at::native::multi_tensor_apply_for_fused_optimizer<5>(
-            tensor_lists,
-            state_steps,
-            FusedAdamMathFunctor(),
-            lr,
-            beta1,
-            beta2,
-            weight_decay,
-            eps);
+        DISPATCH_MULTI_TENSOR_APPLY([&]() {
+          at::native::multi_tensor_apply_for_fused_optimizer<5>(
+              tensor_lists,
+              state_steps,
+              FusedAdamMathFunctor<large_kernel_arg>(),
+              lr,
+              beta1,
+              beta2,
+              weight_decay,
+              eps);
+        });
       });
 }
 
